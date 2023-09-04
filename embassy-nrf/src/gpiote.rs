@@ -421,7 +421,7 @@ mod sealed {
 /// GPIOTE channel trait.
 ///
 /// Implemented by all GPIOTE channels.
-pub trait Channel: sealed::Channel + Sized {
+pub trait Channel: sealed::Channel + Peripheral<P = Self> + Sized + 'static + Into<AnyChannel> {
     /// Get the channel number.
     fn number(&self) -> usize;
 
@@ -459,6 +459,12 @@ macro_rules! impl_channel {
         impl Channel for peripherals::$type {
             fn number(&self) -> usize {
                 $number as usize
+            }
+        }
+
+        impl From<peripherals::$type> for crate::gpiote::AnyChannel {
+            fn from(val: peripherals::$type) -> Self {
+                crate::gpiote::Channel::degrade(val)
             }
         }
     };

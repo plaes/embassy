@@ -14,8 +14,10 @@ pub use pac::spim0::frequency::FREQUENCY_A as Frequency;
 
 use crate::chip::FORCE_COPY_BUFFER_SIZE;
 use crate::gpio::sealed::Pin as _;
-use crate::gpio::{self, AnyPin, Pin as GpioPin, PselBits};
+use crate::gpio::{self, AnyPin, Input, Pin as GpioPin, PselBits, Pull};
+use crate::gpiote::{AnyChannel, Channel, InputChannel, InputChannelPolarity};
 use crate::interrupt::typelevel::Interrupt;
+use crate::ppi::{AnyConfigurableChannel, ConfigurableChannel, Ppi, Task};
 use crate::util::{slice_in_ram_or, slice_ptr_parts, slice_ptr_parts_mut};
 use crate::{interrupt, pac, Peripheral};
 
@@ -97,6 +99,8 @@ impl<'d, T: Instance> Spim<'d, T> {
             Some(miso.map_into()),
             Some(mosi.map_into()),
             config,
+            None,
+            None,
         )
     }
 
@@ -109,7 +113,7 @@ impl<'d, T: Instance> Spim<'d, T> {
         config: Config,
     ) -> Self {
         into_ref!(sck, mosi);
-        Self::new_inner(spim, sck.map_into(), None, Some(mosi.map_into()), config)
+        Self::new_inner(spim, sck.map_into(), None, Some(mosi.map_into()), config, None, None)
     }
 
     /// Create a new SPIM driver, capable of RX only (MISO only).
@@ -121,19 +125,59 @@ impl<'d, T: Instance> Spim<'d, T> {
         config: Config,
     ) -> Self {
         into_ref!(sck, miso);
-        Self::new_inner(spim, sck.map_into(), Some(miso.map_into()), None, config)
+        Self::new_inner(spim, sck.map_into(), Some(miso.map_into()), None, config, None, None)
+    }
+
+    /// RFC workaround for SPIM failing to handle single-bit tx/rx - errata 58
+    #[cfg(any(feature = "nrf52832",))]
+    pub fn new_with_single_byte_errata(
+        spim: impl Peripheral<P = T> + 'd,
+        _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
+        sck: impl Peripheral<P = impl GpioPin> + 'd,
+        miso: impl Peripheral<P = impl GpioPin> + 'd,
+        mosi: impl Peripheral<P = impl GpioPin> + 'd,
+        config: Config,
+        gpiote_ch: impl Peripheral<P = impl Channel> + 'd,
+        ppi_ch: impl Peripheral<P = impl ConfigurableChannel> + 'd,
+    ) -> Self {
+        into_ref!(sck, miso, mosi, gpiote_ch, ppi_ch);
+        Self::new_inner(
+            spim,
+            sck.map_into(),
+            Some(miso.map_into()),
+            Some(mosi.map_into()),
+            config,
+            Some(gpiote_ch.map_into()),
+            Some(ppi_ch.map_into()),
+        )
     }
 
     fn new_inner(
         spim: impl Peripheral<P = T> + 'd,
-        sck: PeripheralRef<'d, AnyPin>,
+        mut sck: PeripheralRef<'d, AnyPin>,
         miso: Option<PeripheralRef<'d, AnyPin>>,
         mosi: Option<PeripheralRef<'d, AnyPin>>,
         config: Config,
+        gpiote_ch: Option<PeripheralRef<'d, AnyChannel>>,
+        ppi_ch: Option<PeripheralRef<'d, AnyConfigurableChannel>>,
     ) -> Self {
         into_ref!(spim);
 
         let r = T::regs();
+
+        // Set up workaround for Errata 58 for SPIM
+        let mut gte;
+        let mut ppi;
+        if let Some(err_gpiote) = gpiote_ch {
+            // XXX We cannot use the sck as input...
+            gte = InputChannel::new(err_gpiote, Input::new(&mut sck, Pull::Up), InputChannelPolarity::Toggle);
+
+            if let Some(err_ppi) = ppi_ch {
+                let spim_reg = Task::from_reg(&r.tasks_stop);
+                ppi = Ppi::new_one_to_one(err_ppi, gte.event_in(), spim_reg);
+                ppi.enable();
+            }
+        }
 
         // Configure pins
         sck.conf().write(|w| w.dir().output().drive().h0h1());
