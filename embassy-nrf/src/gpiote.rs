@@ -205,6 +205,7 @@ impl<'d, C: Channel> XXXChannel<'d, C> {
                 InputChannelPolarity::None => w.mode().event().polarity().none(),
                 InputChannelPolarity::Toggle => w.mode().event().polarity().toggle(),
             };
+
             /* XXX
             #[cfg(any(feature = "nrf52833", feature = "nrf52840"))]
             w.port().bit(match pin.pin.pin.port() {
@@ -212,12 +213,21 @@ impl<'d, C: Channel> XXXChannel<'d, C> {
                 crate::gpio::Port::Port1 => true,
             });
             */
-            // XXX: How does it actually know which gpio we are dealing with?
             info!("XXX: {}", psel_bits);
             unsafe { w.psel().bits(psel_bits) }
         });
 
+        /* XXX: OK for SPIM0 -> sck event:
+         * 0x31001 == 0b110001000000000001
+         * */
+        let x = g.config[num].read().bits();
+        info!("config[x]: {=u32:#b}", x);
+
+        let x = g.events_in[num].read().bits();
+        info!("events[x]: {=u32:#b}", x);
+
         g.events_in[num].reset();
+        //g.intenset.write(|w| unsafe { w.bits(1 << num) });
 
         //XXXChannel { ch, pin }
         XXXChannel { ch }

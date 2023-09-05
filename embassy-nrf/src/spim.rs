@@ -17,7 +17,7 @@ use crate::gpio::sealed::Pin as _;
 use crate::gpio::{self, AnyPin, Input, Pin as GpioPin, PselBits, Pull};
 use crate::gpiote::{AnyChannel, Channel, InputChannelPolarity, XXXChannel};
 use crate::interrupt::typelevel::Interrupt;
-use crate::ppi::{AnyConfigurableChannel, ConfigurableChannel, Event, Ppi, Task};
+use crate::ppi::{AnyConfigurableChannel, ConfigurableChannel, Ppi, Task};
 use crate::util::{slice_in_ram_or, slice_ptr_parts, slice_ptr_parts_mut};
 use crate::{interrupt, pac, Peripheral};
 
@@ -160,29 +160,13 @@ impl<'d, T: Instance> Spim<'d, T> {
         miso: Option<PeripheralRef<'d, AnyPin>>,
         mosi: Option<PeripheralRef<'d, AnyPin>>,
         config: Config,
-        // SPIM Errata 58 for nrf52832
+        // XXX: SPIM Errata 58 for nrf52832
         gpiote_ch: Option<PeripheralRef<'d, AnyChannel>>,
         ppi_ch: Option<PeripheralRef<'d, AnyConfigurableChannel>>,
     ) -> Self {
         into_ref!(spim);
 
         let r = T::regs();
-
-        // Initialize SPIM errata 58 workaround ...
-        let (mut ppi, gpt) = match ppi_ch {
-            Some(p) => {
-                // TODO: Set up gpiote against the psel.sck, but as GPIOTE API does not currently
-                // support setting up event watchers for GPIO pins without taking full ownership
-                let gpch = XXXChannel::new(gpiote_ch.unwrap(), sck.pin(), InputChannelPolarity::Toggle);
-                let spim_reg = Task::from_reg(&r.tasks_stop);
-                let mut ppi = Ppi::new_one_to_one(p, gpch.event_in(), spim_reg);
-                ppi.enable();
-
-                (Some(ppi), Some(gpch))
-            },
-            None => (None, None)
-        };
-
 
         // Configure pins
         sck.conf().write(|w| w.dir().output().drive().h0h1());
@@ -252,6 +236,27 @@ impl<'d, T: Instance> Spim<'d, T> {
         // Set over-read character
         let orc = config.orc;
         r.orc.write(|w| unsafe { w.orc().bits(orc) });
+
+        // Initialize SPIM errata 58 workaround ...
+        let (ppi, gpt) = match ppi_ch {
+            Some(p_ch) => {
+                // TODO: We need proper GPIOTE channel implementation that allows borrows for reading events...
+                let gpch = XXXChannel::new(gpiote_ch.unwrap(), sck.pin(), InputChannelPolarity::Toggle);
+                let event = gpch.event_in();
+                // XXX: correct!
+                // 0x40006000 + 0x100 : GPIOTE / EVENTS_IN[0]
+                info!("SPIM eep: {:#x}", event.reg_val());
+                // XXX: correct!
+                // 0x40003000 + 0x014 : SPIM0 / TASKS_STOP
+                let tasks_stop = Task::from_reg(&r.tasks_stop);
+                info!("SPIM tep: {:#x}", tasks_stop.reg_val());
+                let mut ppi = Ppi::new_one_to_one(p_ch, event, tasks_stop);
+                // XXX ...
+                ppi.enable();
+                (Some(ppi), Some(gpch))
+            },
+            None => (None, None)
+        };
 
         // Disable all events interrupts
         r.intenclr.write(|w| unsafe { w.bits(0xFFFF_FFFF) });
