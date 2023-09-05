@@ -17,7 +17,7 @@ use crate::gpio::sealed::Pin as _;
 use crate::gpio::{self, AnyPin, Input, Pin as GpioPin, PselBits, Pull};
 use crate::gpiote::{AnyChannel, Channel, InputChannel, InputChannelPolarity};
 use crate::interrupt::typelevel::Interrupt;
-use crate::ppi::{AnyConfigurableChannel, ConfigurableChannel, Ppi, Task};
+use crate::ppi::{AnyConfigurableChannel, ConfigurableChannel, Event, Ppi, Task};
 use crate::util::{slice_in_ram_or, slice_ptr_parts, slice_ptr_parts_mut};
 use crate::{interrupt, pac, Peripheral};
 
@@ -80,6 +80,7 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
 /// SPIM driver.
 pub struct Spim<'d, T: Instance> {
     _p: PeripheralRef<'d, T>,
+    _ppi_ch: Option<Ppi<'d, AnyConfigurableChannel, 1, 1>>,
 }
 
 impl<'d, T: Instance> Spim<'d, T> {
@@ -154,11 +155,11 @@ impl<'d, T: Instance> Spim<'d, T> {
 
     fn new_inner(
         spim: impl Peripheral<P = T> + 'd,
-        mut sck: PeripheralRef<'d, AnyPin>,
+        sck: PeripheralRef<'d, AnyPin>,
         miso: Option<PeripheralRef<'d, AnyPin>>,
         mosi: Option<PeripheralRef<'d, AnyPin>>,
         config: Config,
-        gpiote_ch: Option<PeripheralRef<'d, AnyChannel>>,
+        _gpiote_ch: Option<PeripheralRef<'d, AnyChannel>>,
         ppi_ch: Option<PeripheralRef<'d, AnyConfigurableChannel>>,
     ) -> Self {
         into_ref!(spim);
@@ -166,18 +167,20 @@ impl<'d, T: Instance> Spim<'d, T> {
         let r = T::regs();
 
         // Set up workaround for Errata 58 for SPIM
-        let mut gte;
-        let mut ppi;
-        if let Some(err_gpiote) = gpiote_ch {
-            // XXX We cannot use the sck as input...
-            gte = InputChannel::new(err_gpiote, Input::new(&mut sck, Pull::Up), InputChannelPolarity::Toggle);
-
-            if let Some(err_ppi) = ppi_ch {
+        let ppi = match ppi_ch {
+            Some(p) => {
+                // TODO: Set up gpiote against the psel.sck, but
+                // .. it as gpiote API currently does not support setting up event watchers for GPIO pins without ownership
+                // InputChannel::new(err_gpiote, Input::new(&mut sck, Pull::Up), InputChannelPolarity::Toggle);
+                let sck_reg = Event::from_reg(&r.psel.sck);
                 let spim_reg = Task::from_reg(&r.tasks_stop);
-                ppi = Ppi::new_one_to_one(err_ppi, gte.event_in(), spim_reg);
+                let mut ppi = Ppi::new_one_to_one(p, sck_reg, spim_reg);
                 ppi.enable();
-            }
-        }
+                Some(ppi)
+            },
+            None => None
+        };
+
 
         // Configure pins
         sck.conf().write(|w| w.dir().output().drive().h0h1());
@@ -254,7 +257,7 @@ impl<'d, T: Instance> Spim<'d, T> {
         T::Interrupt::unpend();
         unsafe { T::Interrupt::enable() };
 
-        Self { _p: spim }
+        Self { _p: spim,  _ppi_ch: ppi}
     }
 
     fn prepare(&mut self, rx: *mut [u8], tx: *const [u8]) -> Result<(), Error> {
