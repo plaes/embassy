@@ -162,12 +162,71 @@ pub struct InputChannel<'d, C: Channel, T: GpioPin> {
     pin: Input<'d, T>,
 }
 
+pub struct XXXChannel<'d, C:Channel> {
+//pub struct XXXChannel<'d, C:Channel, T: GpioPin> {
+    ch: PeripheralRef<'d, C>,
+    // pin: PeripheralRef<'d, T>,
+}
+
 impl<'d, C: Channel, T: GpioPin> Drop for InputChannel<'d, C, T> {
     fn drop(&mut self) {
         let g = regs();
         let num = self.ch.number();
         g.config[num].write(|w| w.mode().disabled());
         g.intenclr.write(|w| unsafe { w.bits(1 << num) });
+    }
+}
+
+//impl<'d, C: Channel, T: GpioPin> Drop for XXXChannel<'d, C, T> {
+impl<'d, C: Channel> Drop for XXXChannel<'d, C> {
+    fn drop(&mut self) {
+        let g = regs();
+        let num = self.ch.number();
+        g.config[num].write(|w| w.mode().disabled());
+        g.intenclr.write(|w| unsafe { w.bits(1 << num) });
+    }
+}
+
+//impl<'d, C: Channel, T: GpioPin> XXXChannel<'d, C, T> {
+impl<'d, C: Channel> XXXChannel<'d, C> {
+    /// Create a new GPIOTE input channel driver.
+    //pub fn new(ch: impl Peripheral<P = C> + 'd, pin: impl Peripheral<P = T> + 'd, polarity: InputChannelPolarity) -> Self {
+    pub fn new(ch: impl Peripheral<P = C> + 'd, psel_bits: u8, polarity: InputChannelPolarity) -> Self {
+        //into_ref!(ch, pin);
+        into_ref!(ch);
+
+        let g = regs();
+        let num = ch.number();
+
+        g.config[num].write(|w| {
+            match polarity {
+                InputChannelPolarity::HiToLo => w.mode().event().polarity().hi_to_lo(),
+                InputChannelPolarity::LoToHi => w.mode().event().polarity().lo_to_hi(),
+                InputChannelPolarity::None => w.mode().event().polarity().none(),
+                InputChannelPolarity::Toggle => w.mode().event().polarity().toggle(),
+            };
+            /* XXX
+            #[cfg(any(feature = "nrf52833", feature = "nrf52840"))]
+            w.port().bit(match pin.pin.pin.port() {
+                crate::gpio::Port::Port0 => false,
+                crate::gpio::Port::Port1 => true,
+            });
+            */
+            // XXX: How does it actually know which gpio we are dealing with?
+            info!("XXX: {}", psel_bits);
+            unsafe { w.psel().bits(psel_bits) }
+        });
+
+        g.events_in[num].reset();
+
+        //XXXChannel { ch, pin }
+        XXXChannel { ch }
+     }
+
+    /// Returns the IN event, for use with PPI.
+    pub fn event_in(&self) -> Event<'d> {
+        let g = regs();
+        Event::from_reg(&g.events_in[self.ch.number()])
     }
 }
 
