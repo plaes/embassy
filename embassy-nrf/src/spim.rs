@@ -15,7 +15,7 @@ pub use pac::spim0::frequency::FREQUENCY_A as Frequency;
 use crate::chip::FORCE_COPY_BUFFER_SIZE;
 use crate::gpio::sealed::Pin as _;
 use crate::gpio::{self, AnyPin, Input, Pin as GpioPin, PselBits, Pull};
-use crate::gpiote::{AnyChannel, Channel, InputChannel, InputChannelPolarity};
+use crate::gpiote::{AnyChannel, Channel, InputChannelPolarity, XXXChannel};
 use crate::interrupt::typelevel::Interrupt;
 use crate::ppi::{AnyConfigurableChannel, ConfigurableChannel, Event, Ppi, Task};
 use crate::util::{slice_in_ram_or, slice_ptr_parts, slice_ptr_parts_mut};
@@ -81,6 +81,7 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
 pub struct Spim<'d, T: Instance> {
     _p: PeripheralRef<'d, T>,
     _ppi_ch: Option<Ppi<'d, AnyConfigurableChannel, 1, 1>>,
+    _gpiote_ch: Option<XXXChannel<'d, AnyChannel>>,
 }
 
 impl<'d, T: Instance> Spim<'d, T> {
@@ -159,26 +160,27 @@ impl<'d, T: Instance> Spim<'d, T> {
         miso: Option<PeripheralRef<'d, AnyPin>>,
         mosi: Option<PeripheralRef<'d, AnyPin>>,
         config: Config,
-        _gpiote_ch: Option<PeripheralRef<'d, AnyChannel>>,
+        // SPIM Errata 58 for nrf52832
+        gpiote_ch: Option<PeripheralRef<'d, AnyChannel>>,
         ppi_ch: Option<PeripheralRef<'d, AnyConfigurableChannel>>,
     ) -> Self {
         into_ref!(spim);
 
         let r = T::regs();
 
-        // Set up workaround for Errata 58 for SPIM
-        let ppi = match ppi_ch {
+        // Initialize SPIM errata 58 workaround ...
+        let (mut ppi, gpt) = match ppi_ch {
             Some(p) => {
-                // TODO: Set up gpiote against the psel.sck, but
-                // .. it as gpiote API currently does not support setting up event watchers for GPIO pins without ownership
-                // InputChannel::new(err_gpiote, Input::new(&mut sck, Pull::Up), InputChannelPolarity::Toggle);
-                let sck_reg = Event::from_reg(&r.psel.sck);
+                // TODO: Set up gpiote against the psel.sck, but as GPIOTE API does not currently
+                // support setting up event watchers for GPIO pins without taking full ownership
+                let gpch = XXXChannel::new(gpiote_ch.unwrap(), sck.pin(), InputChannelPolarity::Toggle);
                 let spim_reg = Task::from_reg(&r.tasks_stop);
-                let mut ppi = Ppi::new_one_to_one(p, sck_reg, spim_reg);
+                let mut ppi = Ppi::new_one_to_one(p, gpch.event_in(), spim_reg);
                 ppi.enable();
-                Some(ppi)
+
+                (Some(ppi), Some(gpch))
             },
-            None => None
+            None => (None, None)
         };
 
 
@@ -257,7 +259,7 @@ impl<'d, T: Instance> Spim<'d, T> {
         T::Interrupt::unpend();
         unsafe { T::Interrupt::enable() };
 
-        Self { _p: spim,  _ppi_ch: ppi}
+        Self { _p: spim, _ppi_ch: ppi, _gpiote_ch: gpt}
     }
 
     fn prepare(&mut self, rx: *mut [u8], tx: *const [u8]) -> Result<(), Error> {
